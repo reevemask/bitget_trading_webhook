@@ -35,7 +35,7 @@ BITGET_PASSPHRASE = os.environ.get('BITGET_PASSPHRASE', 'YOUR_PASSPHRASE_HERE')
 BITGET_BASE_URL = "https://api.bitget.com"
 
 # 거래 설정
-LOSS_RATIO = float(os.environ.get('LOSS_RATIO', '3'))  # 손실 비율 (%)
+LOSS_RATIO = float(os.environ.get('LOSS_RATIO', '15'))  # 손실 비율 (%)
 MAX_LEVERAGE = 30  # 최대 레버리지
 STATS_FILE = 'trading_stats.pkl'  # 통계 파일
 
