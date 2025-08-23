@@ -35,7 +35,7 @@ BITGET_PASSPHRASE = os.environ.get('BITGET_PASSPHRASE', 'YOUR_PASSPHRASE_HERE')
 BITGET_BASE_URL = "https://api.bitget.com"
 
 # 거래 설정
-LOSS_RATIO = float(os.environ.get('LOSS_RATIO', '15'))  # 손실 비율 (%)
+LOSS_RATIO = float(os.environ.get('LOSS_RATIO', '3'))  # 손실 비율 (%)
 MAX_LEVERAGE = 30  # 최대 레버리지
 STATS_FILE = 'trading_stats.pkl'  # 통계 파일
 
@@ -563,6 +563,91 @@ def handle_telegram_command(command: str):
 새로운 통계 수집을 시작합니다."""
             send_telegram_message(message)
             
+        elif command == '/M' or command == '/m':
+            # Bitget 서버 연결 상태 확인
+            message = "🔍 <b>Bitget 서버 연결 확인 중...</b>"
+            send_telegram_message(message)
+            
+            try:
+                bitget = BitgetFuturesClient()
+                start_time = time.time()
+                
+                # 1. API 연결 테스트 (계좌 정보 조회)
+                balance = bitget.get_available_balance()
+                api_latency = (time.time() - start_time) * 1000  # ms
+                
+                # 2. 서버 시간 확인 (선택적)
+                server_time_test = True
+                try:
+                    # 서버 시간 API 호출 (공개 엔드포인트)
+                    response = requests.get(f"{BITGET_BASE_URL}/api/spot/v1/public/time", timeout=5)
+                    server_data = response.json()
+                    if server_data.get('code') == '00000':
+                        server_timestamp = server_data.get('data', {}).get('serverTime', 0)
+                        local_timestamp = int(time.time() * 1000)
+                        time_diff = abs(server_timestamp - local_timestamp)
+                        time_sync = "정상" if time_diff < 5000 else f"차이 {time_diff}ms"
+                    else:
+                        time_sync = "확인 불가"
+                except:
+                    server_time_test = False
+                    time_sync = "확인 실패"
+                
+                # 3. 포지션 조회 테스트
+                positions_test = True
+                try:
+                    positions = bitget.get_positions()
+                    positions_count = len(positions) if positions else 0
+                except:
+                    positions_test = False
+                    positions_count = -1
+                
+                # 연결 상태 평가
+                if balance >= 0 and api_latency < 3000:
+                    status_emoji = "✅"
+                    status_text = "정상"
+                    status_detail = "모든 시스템 정상 작동"
+                elif balance >= 0:
+                    status_emoji = "⚠️"
+                    status_text = "느림"
+                    status_detail = f"응답 지연 ({api_latency:.0f}ms)"
+                else:
+                    status_emoji = "❌"
+                    status_text = "오류"
+                    status_detail = "API 연결 실패"
+                
+                # 상태 메시지 구성
+                message = f"""{status_emoji} <b>Bitget 서버 상태</b>
+
+📡 <b>연결 상태:</b> {status_text}
+⚡ <b>응답 속도:</b> {api_latency:.0f}ms
+💰 <b>잔고 조회:</b> {'✅ 성공' if balance >= 0 else '❌ 실패'}
+📊 <b>포지션 조회:</b> {'✅ 성공' if positions_test else '❌ 실패'}
+🕐 <b>시간 동기화:</b> {time_sync}
+
+💵 <b>가용 잔고:</b> {balance:,.2f} USDT
+📈 <b>활성 포지션:</b> {positions_count if positions_count >= 0 else '확인 불가'}개
+
+📝 <b>상태 요약:</b> {status_detail}
+⏰ <b>확인 시간:</b> {datetime.now().strftime('%H:%M:%S')}"""
+                
+            except Exception as e:
+                # 연결 실패 메시지
+                message = f"""❌ <b>Bitget 서버 연결 실패</b>
+
+⚠️ <b>오류 내용:</b> {str(e)}
+
+<b>확인 사항:</b>
+1. API Key가 올바른지 확인
+2. Secret Key가 올바른지 확인
+3. Passphrase가 올바른지 확인
+4. API 권한 설정 확인 (Futures 권한)
+5. IP 화이트리스트 설정 확인
+
+⏰ <b>확인 시간:</b> {datetime.now().strftime('%H:%M:%S')}"""
+            
+            send_telegram_message(message)
+            
         elif command == '/S' or command == '/s':
             # 통계 및 상태 조회
             bitget = BitgetFuturesClient()
@@ -676,7 +761,8 @@ def test_connection():
 
 텔레그램 명령어:
 /S - 상태 및 통계 조회
-/R - 통계 초기화"""
+/R - 통계 초기화
+/M - Bitget 서버 상태 확인"""
         
         send_telegram_message(message)
         
