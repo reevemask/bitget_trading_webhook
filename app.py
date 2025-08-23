@@ -183,13 +183,41 @@ class BitgetFuturesClient:
     def get_available_balance(self) -> float:
         """사용 가능한 USDT 잔고 조회"""
         try:
+            # 선물 계좌 잔고 조회 (수정된 엔드포인트)
             result = self._make_request('GET', '/account/accounts', {
                 'productType': 'umcbl'
             })
             
-            for account in result:
-                if account.get('marginCoin') == 'USDT':
-                    return float(account.get('available', 0))
+            # 응답이 리스트인 경우
+            if isinstance(result, list):
+                for account in result:
+                    if account.get('marginCoin') == 'USDT':
+                        # available이 없으면 crossMaxAvailable 확인
+                        available = account.get('available') or account.get('crossMaxAvailable') or account.get('usdtEquity')
+                        if available:
+                            return float(available)
+            # 응답이 딕셔너리인 경우
+            elif isinstance(result, dict):
+                # 직접 USDT 정보 확인
+                if result.get('marginCoin') == 'USDT':
+                    available = result.get('available') or result.get('crossMaxAvailable') or result.get('usdtEquity')
+                    if available:
+                        return float(available)
+            
+            # 다른 방법으로 시도 - 특정 심볼로 계좌 정보 조회
+            try:
+                account_info = self._make_request('GET', '/account/account', {
+                    'symbol': 'BTCUSDT_UMCBL',
+                    'marginCoin': 'USDT'
+                })
+                if account_info:
+                    # crossMaxAvailable: 크로스 모드에서 사용 가능한 최대 금액
+                    # available: 격리 모드에서 사용 가능한 금액
+                    available = account_info.get('crossMaxAvailable') or account_info.get('available')
+                    if available:
+                        return float(available)
+            except:
+                pass
             
             return 0.0
             
@@ -576,10 +604,33 @@ def handle_telegram_command(command: str):
                 balance = bitget.get_available_balance()
                 api_latency = (time.time() - start_time) * 1000  # ms
                 
-                # 2. 서버 시간 확인 (선택적)
+                # 2. 더 상세한 계좌 정보 조회 시도
+                detailed_balance_info = ""
+                try:
+                    # 전체 계좌 정보 조회
+                    accounts_result = bitget._make_request('GET', '/account/accounts', {'productType': 'umcbl'})
+                    if accounts_result:
+                        if isinstance(accounts_result, list):
+                            for acc in accounts_result:
+                                if acc.get('marginCoin') == 'USDT':
+                                    equity = acc.get('usdtEquity', 0)
+                                    available = acc.get('available', 0)
+                                    cross_available = acc.get('crossMaxAvailable', 0)
+                                    frozen = acc.get('frozen', 0)
+                                    detailed_balance_info = f"""
+💎 <b>계좌 상세:</b>
+• 총 자산: {float(equity):,.2f} USDT
+• 가용 잔고: {float(available):,.2f} USDT
+• 크로스 가용: {float(cross_available):,.2f} USDT
+• 동결 금액: {float(frozen):,.2f} USDT"""
+                                    # 가장 큰 값을 실제 잔고로 사용
+                                    balance = max(float(available), float(cross_available), float(equity))
+                except Exception as e:
+                    detailed_balance_info = f"\n⚠️ 상세 정보 조회 실패: {str(e)}"
+                
+                # 3. 서버 시간 확인
                 server_time_test = True
                 try:
-                    # 서버 시간 API 호출 (공개 엔드포인트)
                     response = requests.get(f"{BITGET_BASE_URL}/api/spot/v1/public/time", timeout=5)
                     server_data = response.json()
                     if server_data.get('code') == '00000':
@@ -593,43 +644,51 @@ def handle_telegram_command(command: str):
                     server_time_test = False
                     time_sync = "확인 실패"
                 
-                # 3. 포지션 조회 테스트
+                # 4. 포지션 조회 테스트
                 positions_test = True
+                positions_info = ""
                 try:
                     positions = bitget.get_positions()
                     positions_count = len(positions) if positions else 0
+                    if positions and len(positions) > 0:
+                        positions_info = "\n📊 <b>활성 포지션:</b>"
+                        for pos in positions[:3]:  # 최대 3개만 표시
+                            symbol = pos.get('symbol', 'Unknown')
+                            side = pos.get('holdSide', '')
+                            size = pos.get('total', 0)
+                            positions_info += f"\n• {symbol}: {side} {size}"
                 except:
                     positions_test = False
                     positions_count = -1
                 
                 # 연결 상태 평가
-                if balance >= 0 and api_latency < 3000:
+                if api_latency < 3000:
                     status_emoji = "✅"
                     status_text = "정상"
                     status_detail = "모든 시스템 정상 작동"
-                elif balance >= 0:
+                elif api_latency < 5000:
                     status_emoji = "⚠️"
                     status_text = "느림"
                     status_detail = f"응답 지연 ({api_latency:.0f}ms)"
                 else:
                     status_emoji = "❌"
-                    status_text = "오류"
-                    status_detail = "API 연결 실패"
+                    status_text = "매우 느림"
+                    status_detail = f"심각한 지연 ({api_latency:.0f}ms)"
                 
                 # 상태 메시지 구성
                 message = f"""{status_emoji} <b>Bitget 서버 상태</b>
 
 📡 <b>연결 상태:</b> {status_text}
 ⚡ <b>응답 속도:</b> {api_latency:.0f}ms
-💰 <b>잔고 조회:</b> {'✅ 성공' if balance >= 0 else '❌ 실패'}
-📊 <b>포지션 조회:</b> {'✅ 성공' if positions_test else '❌ 실패'}
 🕐 <b>시간 동기화:</b> {time_sync}
-
-💵 <b>가용 잔고:</b> {balance:,.2f} USDT
-📈 <b>활성 포지션:</b> {positions_count if positions_count >= 0 else '확인 불가'}개
+{detailed_balance_info if detailed_balance_info else f'💵 <b>가용 잔고:</b> {balance:,.2f} USDT'}
+📈 <b>포지션 수:</b> {positions_count if positions_count >= 0 else '확인 불가'}개{positions_info}
 
 📝 <b>상태 요약:</b> {status_detail}
-⏰ <b>확인 시간:</b> {datetime.now().strftime('%H:%M:%S')}"""
+⏰ <b>확인 시간:</b> {datetime.now().strftime('%H:%M:%S')}
+
+💡 <b>참고:</b> 선물 계좌 잔고를 표시합니다.
+현물 계좌와는 별도로 관리됩니다."""
                 
             except Exception as e:
                 # 연결 실패 메시지
