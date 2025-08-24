@@ -109,14 +109,20 @@ class BitgetFuturesClient:
         self.base_url = BITGET_BASE_URL
     
     def _generate_signature(self, timestamp: str, method: str, request_path: str, body: str = '') -> str:
-        """API 서명 생성"""
-        message = timestamp + method + request_path + body
+        """API 서명 생성 - Bitget 공식 문서 기준"""
+        # GET 요청에서 쿼리 파라미터가 있는 경우 request_path에 포함되어야 함
+        message = timestamp + method.upper() + request_path + body
+        
+        # HMAC SHA256 서명 생성
         mac = hmac.new(
-            bytes(self.secret_key, encoding='utf8'),
-            bytes(message, encoding='utf8'),
+            bytes(self.secret_key, encoding='utf-8'),
+            bytes(message, encoding='utf-8'),
             digestmod='sha256'
         )
-        return base64.b64encode(mac.digest()).decode()
+        
+        # Base64 인코딩
+        signature = base64.b64encode(mac.digest()).decode()
+        return signature
     
     def _make_request(self, method: str, endpoint: str, data: Dict = None) -> Dict:
         """API 요청 실행"""
@@ -126,11 +132,17 @@ class BitgetFuturesClient:
             # 선물 거래 엔드포인트
             request_path = f"/api/mix/v1{endpoint}"
             
-            body = ''
-            if data:
-                body = json.dumps(data)
+            # GET 요청의 경우 쿼리 파라미터를 URL에 추가
+            if method.upper() == 'GET' and data:
+                params = '&'.join([f"{k}={v}" for k, v in data.items()])
+                full_path = f"{request_path}?{params}"
+                body = ''
+            else:
+                full_path = request_path
+                body = json.dumps(data) if data else ''
             
-            signature = self._generate_signature(timestamp, method.upper(), request_path, body)
+            # 서명 생성 (GET 요청은 쿼리 파라미터 포함된 경로 사용)
+            signature = self._generate_signature(timestamp, method.upper(), full_path, body)
             
             headers = {
                 'ACCESS-KEY': self.api_key,
@@ -141,22 +153,27 @@ class BitgetFuturesClient:
                 'locale': 'en-US'
             }
             
-            url = self.base_url + request_path
+            url = self.base_url + full_path
             
             if method.upper() == 'GET':
-                if data:
-                    params = '&'.join([f"{k}={v}" for k, v in data.items()])
-                    url = f"{url}?{params}"
                 response = requests.get(url, headers=headers, timeout=10)
             elif method.upper() == 'POST':
                 response = requests.post(url, headers=headers, data=body, timeout=10)
             else:
                 raise ValueError(f"Unsupported method: {method}")
             
+            # 응답 처리
+            if response.status_code != 200:
+                logger.error(f"HTTP Error {response.status_code}: {response.text}")
+                raise Exception(f"HTTP Error {response.status_code}")
+            
             result = response.json()
             
+            # Bitget API 에러 체크
             if result.get('code') != '00000':
-                raise Exception(f"API Error: {result.get('msg', 'Unknown error')}")
+                error_msg = result.get('msg', 'Unknown error')
+                logger.error(f"API Error: {error_msg}, Full response: {result}")
+                raise Exception(f"API Error: {error_msg}")
             
             return result.get('data', {})
             
@@ -617,12 +634,14 @@ def handle_telegram_command(command: str):
                                     available = acc.get('available', 0)
                                     cross_available = acc.get('crossMaxAvailable', 0)
                                     frozen = acc.get('frozen', 0)
+                                    unrealized_pnl = acc.get('unrealizedPL', 0)
                                     detailed_balance_info = f"""
 💎 <b>계좌 상세:</b>
 • 총 자산: {float(equity):,.2f} USDT
 • 가용 잔고: {float(available):,.2f} USDT
 • 크로스 가용: {float(cross_available):,.2f} USDT
-• 동결 금액: {float(frozen):,.2f} USDT"""
+• 동결 금액: {float(frozen):,.2f} USDT
+• 미실현 손익: {float(unrealized_pnl):,.2f} USDT"""
                                     # 가장 큰 값을 실제 잔고로 사용
                                     balance = max(float(available), float(cross_available), float(equity))
                 except Exception as e:
