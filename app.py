@@ -5,6 +5,7 @@ import json
 import hmac
 import hashlib
 import time
+import base64  # base64 import 추가!
 from datetime import datetime
 import logging
 import threading
@@ -120,7 +121,6 @@ class BitgetFuturesClient:
     def _make_request(self, method: str, endpoint: str, data: Dict = None) -> Dict:
         """API 요청 실행"""
         try:
-            import base64
             timestamp = str(int(time.time() * 1000))
             
             # 선물 거래 엔드포인트
@@ -780,7 +780,23 @@ def home():
 def webhook():
     """TradingView 웹훅 수신"""
     try:
-        data = request.get_json()
+        # Content-Type 확인 및 데이터 파싱
+        content_type = request.headers.get('Content-Type', '')
+        
+        # JSON 데이터 파싱 시도
+        if 'application/json' in content_type:
+            data = request.get_json()
+        else:
+            # Content-Type이 application/json이 아닌 경우 raw data로 파싱
+            raw_data = request.get_data(as_text=True)
+            try:
+                # TradingView는 때때로 text/plain으로 JSON을 보냄
+                data = json.loads(raw_data)
+            except json.JSONDecodeError:
+                # JSON 파싱 실패 시 raw 텍스트 그대로 처리
+                logger.warning(f"JSON 파싱 실패, raw data: {raw_data[:200]}")
+                data = {'raw_message': raw_data}
+        
         if not data:
             return jsonify({'error': 'No data received'}), 400
         
@@ -797,10 +813,31 @@ def webhook():
             return jsonify(result), 200
             
         else:
+            # action이 없는 경우 raw message 확인
+            if 'raw_message' in data:
+                logger.warning(f"알 수 없는 메시지 형식: {data['raw_message'][:100]}")
+                message = f"""⚠️ <b>알 수 없는 웹훅 형식</b>
+
+받은 데이터: {data['raw_message'][:200]}
+
+TradingView Alert 메시지를 JSON 형식으로 설정해주세요:
+{{"action": "ENTRY", "symbol": "BTCUSDT", ...}}"""
+                send_telegram_message(message)
+            
             return jsonify({'error': f'Unknown action: {action}'}), 400
             
     except Exception as e:
         logger.error(f"웹훅 처리 오류: {str(e)}")
+        
+        # 오류 상세 정보 텔레그램 전송
+        error_message = f"""❌ <b>웹훅 처리 오류</b>
+
+오류: {str(e)}
+시간: {datetime.now().strftime('%H:%M:%S')}
+
+TradingView Alert 설정을 확인해주세요."""
+        send_telegram_message(error_message)
+        
         return jsonify({'error': str(e)}), 500
 
 @app.route('/test', methods=['GET'])
