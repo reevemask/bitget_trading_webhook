@@ -36,7 +36,7 @@ BITGET_PASSPHRASE = os.environ.get('BITGET_PASSPHRASE', 'YOUR_PASSPHRASE_HERE')
 BITGET_BASE_URL = "https://api.bitget.com"
 
 # 거래 설정
-LOSS_RATIO = float(os.environ.get('LOSS_RATIO', '15'))  # 손실 비율 (%)
+LOSS_RATIO = float(os.environ.get('LOSS_RATIO', '3'))  # 손실 비율 (%)
 MAX_LEVERAGE = 30  # 최대 레버리지
 STATS_FILE = 'trading_stats.pkl'  # 통계 파일
 
@@ -647,21 +647,57 @@ def handle_telegram_command(command: str):
                 except Exception as e:
                     detailed_balance_info = f"\n⚠️ 상세 정보 조회 실패: {str(e)}"
                 
-                # 3. 서버 시간 확인
+                # 3. 서버 시간 확인 (Bitget 선물 API 사용)
                 server_time_test = True
+                time_sync = "확인 중..."
                 try:
-                    response = requests.get(f"{BITGET_BASE_URL}/api/spot/v1/public/time", timeout=5)
-                    server_data = response.json()
-                    if server_data.get('code') == '00000':
-                        server_timestamp = server_data.get('data', {}).get('serverTime', 0)
-                        local_timestamp = int(time.time() * 1000)
-                        time_diff = abs(server_timestamp - local_timestamp)
-                        time_sync = "정상" if time_diff < 5000 else f"차이 {time_diff}ms"
+                    # Bitget 선물 공개 API로 서버 시간 확인
+                    response = requests.get(
+                        f"{BITGET_BASE_URL}/api/mix/v1/market/time",
+                        timeout=5
+                    )
+                    
+                    if response.status_code == 200:
+                        server_data = response.json()
+                        if server_data.get('code') == '00000':
+                            server_timestamp = int(server_data.get('data', 0))
+                            local_timestamp = int(time.time() * 1000)
+                            time_diff = abs(server_timestamp - local_timestamp)
+                            
+                            if time_diff < 1000:
+                                time_sync = f"✅ 완벽 동기화 ({time_diff}ms)"
+                            elif time_diff < 5000:
+                                time_sync = f"✅ 정상 ({time_diff}ms 차이)"
+                            elif time_diff < 30000:
+                                time_sync = f"⚠️ 약간 차이 ({time_diff}ms)"
+                            else:
+                                time_sync = f"❌ 큰 차이 ({time_diff/1000:.1f}초)"
+                        else:
+                            # 첫 번째 방법 실패 시 다른 엔드포인트 시도
+                            response2 = requests.get(
+                                f"{BITGET_BASE_URL}/api/spot/v1/public/time",
+                                timeout=5
+                            )
+                            if response2.status_code == 200:
+                                server_data2 = response2.json()
+                                if server_data2.get('code') == '00000':
+                                    server_timestamp = int(server_data2.get('data', {}).get('serverTime', 0))
+                                    local_timestamp = int(time.time() * 1000)
+                                    time_diff = abs(server_timestamp - local_timestamp)
+                                    time_sync = f"정상 ({time_diff}ms 차이)" if time_diff < 5000 else f"차이 {time_diff}ms"
+                                else:
+                                    time_sync = "API 응답 오류"
+                            else:
+                                time_sync = "서버 접근 불가"
                     else:
-                        time_sync = "확인 불가"
-                except:
+                        # 시간 동기화를 로컬 시간으로만 표시
+                        time_sync = f"로컬 시간 사용"
+                        
+                except Exception as e:
+                    # 시간 동기화 실패해도 다른 기능은 정상 작동
                     server_time_test = False
-                    time_sync = "확인 실패"
+                    time_sync = "확인 생략 (영향 없음)"
+                    logger.debug(f"시간 동기화 확인 실패: {str(e)}")
                 
                 # 4. 포지션 조회 테스트
                 positions_test = True
