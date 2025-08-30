@@ -347,18 +347,18 @@ def execute_entry_trade(data: Dict) -> Dict:
     try:
         with position_lock:
             # 현재 포지션 확인
-            if current_position is not None:
-                message = f"""⚠️ <b>거래 신호 무시</b>
+            # if current_position is not None:
+            #    message = f"""⚠️ <b>거래 신호 무시</b>
 
-이미 진행 중인 거래가 있습니다.
-현재 포지션: {current_position.get('symbol')}
-진입가: {current_position.get('entry_price'):,.2f}
+            #이미 진행 중인 거래가 있습니다.
+            #현재 포지션: {current_position.get('symbol')}
+            #진입가: {current_position.get('entry_price'):,.2f}
 
-새로운 신호는 무시됩니다."""
-                send_telegram_message(message)
-                return {'status': 'ignored', 'reason': 'active_position_exists'}
+            #새로운 신호는 무시됩니다."""
+            #    send_telegram_message(message)
+            #    return {'status': 'ignored', 'reason': 'active_position_exists'}
             
-            bitget = BitgetFuturesClient()
+            # bitget = BitgetFuturesClient()
             
             # 기존 포지션 재확인 (API로 확인)
             symbol = data.get('symbol', '')
