@@ -393,10 +393,17 @@ def execute_entry_trade(data: Dict) -> Dict:
             if balance < 10:
                 raise Exception(f"잔고 부족: {balance:.2f} USDT")
             
-            # 포지션 크기 계산 (100% 사용)
-            position_value = balance  # 100% 사용
-            position_size = (position_value * leverage) / entry_price
+            # 포지션 크기 계산 - 안전 마진 적용
+            position_value = balance * 0.95  # 95%만 사용 (수수료 및 안전 마진)
+            position_notional = position_value * leverage  # 명목상 포지션 크기
+            position_size = position_notional / entry_price  # 실제 코인 수량
             position_size = round(position_size, 3)
+            
+            # 최소 주문 크기 확인 (일반적으로 0.001 이상)
+            if position_size < 0.001:
+                raise Exception(f"포지션 크기가 너무 작습니다: {position_size:.6f}")
+                
+            logger.info(f"포지션 계산: 잔고={balance:.2f}, 사용비율=95%, 레버리지={leverage}x, 포지션크기={position_size:.3f}")
             
             # 지정가 주문 실행
             order_id = bitget.place_limit_order(
@@ -412,7 +419,7 @@ def execute_entry_trade(data: Dict) -> Dict:
             if not order_id:
                 raise Exception("주문 실행 실패")
             
-            # 포지션 정보 저장
+            # 포지션 정보 저장 - position_value 수정
             current_position = {
                 'symbol': symbol,
                 'entry_price': entry_price,
@@ -422,10 +429,10 @@ def execute_entry_trade(data: Dict) -> Dict:
                 'leverage': leverage,
                 'order_id': order_id,
                 'timestamp': datetime.now().isoformat(),
-                'balance_used': position_value
+                'balance_used': position_value  # 실제 사용된 잔고 (95% 적용)
             }
             
-            # 성공 메시지
+            # 성공 메시지 - 계산 수정
             risk_amount = position_value * (LOSS_RATIO / 100)
             potential_profit = position_value * leverage * ((tp_price - entry_price) / entry_price)
             
@@ -438,7 +445,8 @@ def execute_entry_trade(data: Dict) -> Dict:
 🛑 <b>손절가:</b> {sl_price:,.2f} USDT ({((sl_price-entry_price)/entry_price)*100:.2f}%)
 
 📊 <b>레버리지:</b> {leverage}x
-💵 <b>사용 잔고:</b> {position_value:,.2f} USDT (100%)
+💵 <b>사용 잔고:</b> {position_value:,.2f} USDT (95%)
+💵 <b>전체 잔고:</b> {balance:,.2f} USDT
 📈 <b>포지션 크기:</b> {position_size:.3f} {symbol.replace('USDT', '')}
 
 💎 <b>예상 수익:</b> +{potential_profit:,.2f} USDT
