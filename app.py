@@ -258,9 +258,16 @@ class BitgetFuturesClient:
     
     def place_limit_order(self, symbol: str, side: str, size: float, price: float, 
                          leverage: int, tp_price: float = None, sl_price: float = None) -> Optional[str]:
-        """지정가 주문 실행"""
+        """지정가 주문 실행 - 가격 정밀도 처리 추가"""
         try:
             formatted_symbol = symbol.replace('USDT', 'USDT_UMCBL')
+            
+            # 가격을 소수점 2자리로 반올림 (Bitget 요구사항)
+            price = round(price, 2)
+            if tp_price:
+                tp_price = round(tp_price, 2)
+            if sl_price:
+                sl_price = round(sl_price, 2)
             
             data = {
                 'symbol': formatted_symbol,
@@ -323,8 +330,10 @@ def send_telegram_message(message: str) -> bool:
 def calculate_leverage(entry_price: float, sl_price: float) -> int:
     """레버리지 계산"""
     risk_percent = abs((entry_price - sl_price) / entry_price) * 100
+    if risk_percent == 0:
+        return 1
     leverage = int(LOSS_RATIO / risk_percent)
-    return min(leverage, MAX_LEVERAGE)  # 최대 레버리지 제한
+    return max(1, min(leverage, MAX_LEVERAGE))
 
 def calculate_position_size(balance: float, leverage: int) -> float:
     """포지션 크기 계산 (100% 사용)"""
@@ -358,11 +367,10 @@ def execute_entry_trade(data: Dict) -> Dict:
                 send_telegram_message(message)
                 return {'status': 'ignored', 'reason': 'position_exists_on_exchange'}
             
-            # 거래 파라미터
-            entry_price = float(data.get('price', 0))
-            tp_price = float(data.get('tp', 0))
-            sl_price = float(data.get('sl', 0))
-            fib_type = data.get('fib_type', '')
+            # 거래 파라미터 - 가격 정밀도 처리
+            entry_price = round(float(data.get('price', 0)), 2)  # 소수점 2자리로 제한
+            tp_price = round(float(data.get('tp', 0)), 2)        # 소수점 2자리로 제한
+            sl_price = round(float(data.get('sl', 0)), 2)        # 소수점 2자리로 제한
             
             # 레버리지 계산
             leverage = calculate_leverage(entry_price, sl_price)
@@ -413,7 +421,6 @@ def execute_entry_trade(data: Dict) -> Dict:
                 'size': position_size,
                 'leverage': leverage,
                 'order_id': order_id,
-                'fib_type': fib_type,
                 'timestamp': datetime.now().isoformat(),
                 'balance_used': position_value
             }
@@ -425,7 +432,6 @@ def execute_entry_trade(data: Dict) -> Dict:
             message = f"""✅ <b>거래 진입 완료!</b>
 
 📈 <b>심볼:</b> {symbol}
-🎯 <b>피보나치:</b> {fib_type} 되돌림
 
 💰 <b>진입가:</b> {entry_price:,.2f} USDT
 🎯 <b>익절가:</b> {tp_price:,.2f} USDT (+{((tp_price-entry_price)/entry_price)*100:.2f}%)
@@ -475,7 +481,8 @@ def execute_exit_trade(data: Dict) -> Dict:
     try:
         with position_lock:
             symbol = data.get('symbol', '')
-            exit_price = float(data.get('exit_price', 0))
+            # exit_price도 소수점 2자리로 제한
+            exit_price = round(float(data.get('exit_price', 0)), 2)
             result = data.get('result', '').upper()
             
             # 포지션 정보 확인
