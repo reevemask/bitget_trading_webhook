@@ -348,7 +348,7 @@ def execute_entry_trade(data: Dict) -> Dict:
         with position_lock:
             # 현재 포지션 확인
             if current_position is not None:
-               message = f"""⚠️ <b>거래 신호 무시</b>
+                message = f"""⚠️ <b>거래 신호 무시</b>
 
 이미 진행 중인 거래가 있습니다.
 현재 포지션: {current_position.get('symbol')}
