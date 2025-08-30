@@ -188,8 +188,11 @@ class BitgetFuturesClient:
         :param leverage: 적용할 레버리지 (int)
         :param hold_side: 포지션 방향 (long / short) - 헷지 모드용
         """
+        # ✅ 심볼 형식 변환: ETHUSDT → ETHUSDT_UMCBL
+        formatted_symbol = symbol.replace('USDT', 'USDT_UMCBL')
+        
         payload = {
-            "symbol": symbol,
+            "symbol": formatted_symbol,
             "marginCoin": "USDT",
             "leverage": str(leverage),
             "holdSide": hold_side
