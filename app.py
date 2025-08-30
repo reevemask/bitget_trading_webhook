@@ -358,7 +358,7 @@ def execute_entry_trade(data: Dict) -> Dict:
             #    send_telegram_message(message)
             #    return {'status': 'ignored', 'reason': 'active_position_exists'}
             
-            # bitget = BitgetFuturesClient()
+            bitget = BitgetFuturesClient()
             
             # 기존 포지션 재확인 (API로 확인)
             symbol = data.get('symbol', '')
