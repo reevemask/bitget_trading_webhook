@@ -127,6 +127,7 @@ class BitgetFuturesClient:
     def _make_request(self, method: str, endpoint: str, data: Dict = None) -> Dict:
         """API 요청 실행"""
         try:
+            # 항상 현재 서버 시간 사용 (클라이언트 시간 무시)
             timestamp = str(int(time.time() * 1000))
             
             # 선물 거래 엔드포인트
