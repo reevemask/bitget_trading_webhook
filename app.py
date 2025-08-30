@@ -180,30 +180,28 @@ class BitgetFuturesClient:
     # =========================
     # ✅ 핵심 변경 1: 레버리지 API로 강제 설정
     # =========================
-    def set_leverage(self, symbol: str, leverage: int, hold_side: Optional[str] = None) -> Dict:
-        """심볼별 레버리지 설정 (v2)
-        문서: POST /api/v2/mix/account/set-leverage
-        - productType: USDT-FUTURES
-        - marginCoin: USDT
-        - holdSide: one-way에서는 생략 가능, hedge-mode에서만 필요
-        """
-        try:
-            payload = {
-                'symbol': symbol.upper(),
-                'productType': 'USDT-FUTURES',
-                'marginCoin': 'USDT'
-            }
-            if hold_side in ('long', 'short'):
-                payload['holdSide'] = hold_side
-            # 교차/원웨이 일반 케이스: leverage 필드 사용
-            payload['leverage'] = str(leverage)
+    def set_leverage(self, symbol: str, leverage: int, hold_side: str = "long"):
+    """
+    심볼별 레버리지 설정
+    :param symbol: 거래 심볼 (예: ETHUSDT)
+    :param leverage: 적용할 레버리지 (int)
+    :param hold_side: 포지션 방향 (long / short) - 헷지 모드용
+    """
+    url = f"{self.base_url}/api/mix/v1/account/setLeverage"
+    payload = {
+        "symbol": symbol,
+        "marginCoin": "USDT",   # Bybit/Bitget 둘 다 기본 USDT 마진이므로 고정
+        "leverage": str(leverage),
+        "holdSide": hold_side
+    }
 
-            result = self._make_request('POST', '/account/set-leverage', payload, version='v2')
-            logger.info(f"레버리지 설정 완료: {result}")
-            return result
-        except Exception as e:
-            logger.error(f"레버리지 설정 실패: {str(e)}")
-            raise
+    try:
+        response = self._make_request("POST", url, payload)
+        logging.info(f"레버리지 설정 성공: {response}")
+        return response
+    except Exception as e:
+        logging.error(f"레버리지 설정 실패: {e}")
+        return None
 
     def get_account_info(self, symbol: str) -> Dict:
         """계좌 정보 조회"""
