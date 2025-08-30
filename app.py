@@ -180,28 +180,32 @@ class BitgetFuturesClient:
     # =========================
     # ✅ 핵심 변경 1: 레버리지 API로 강제 설정
     # =========================
-    def set_leverage(self, symbol: str, leverage: int, hold_side: str = "long"):
-    """
-    심볼별 레버리지 설정
-    :param symbol: 거래 심볼 (예: ETHUSDT)
-    :param leverage: 적용할 레버리지 (int)
-    :param hold_side: 포지션 방향 (long / short) - 헷지 모드용
-    """
-    url = f"{self.base_url}/api/mix/v1/account/setLeverage"
-    payload = {
-        "symbol": symbol,
-        "marginCoin": "USDT",   # Bybit/Bitget 둘 다 기본 USDT 마진이므로 고정
-        "leverage": str(leverage),
-        "holdSide": hold_side
-    }
 
-    try:
-        response = self._make_request("POST", url, payload)
-        logging.info(f"레버리지 설정 성공: {response}")
-        return response
-    except Exception as e:
-        logging.error(f"레버리지 설정 실패: {e}")
-        return None
+    def set_leverage(self, symbol: str, leverage: int, hold_side: str = "long"):
+        """
+        심볼별 레버리지 설정
+        :param symbol: 거래 심볼 (예: ETHUSDT)
+        :param leverage: 적용할 레버리지 (int)
+        :param hold_side: 포지션 방향 (long / short) - 헷지 모드용
+        """
+        payload = {
+            "symbol": symbol,
+            "marginCoin": "USDT",
+            "leverage": str(leverage),
+            "holdSide": hold_side
+        }
+
+        try:
+            # ✅ endpoint만 전달 (url 전체 X)
+            response = self._make_request("POST", "/account/setLeverage", payload, version="v1")
+            logging.info(f"레버리지 설정 성공: {response}")
+            return response
+        except Exception as e:
+            logging.error(f"레버리지 설정 실패: {e}")
+            return None
+    
+
+    
 
     def get_account_info(self, symbol: str) -> Dict:
         """계좌 정보 조회"""
