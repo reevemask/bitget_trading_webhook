@@ -41,6 +41,7 @@ MAX_LEVERAGE = 30  # 최대 레버리지
 STATS_FILE = 'trading_stats.pkl'  # 통계 파일
 
 # 현재 활성 포지션 (메모리에 저장)
+# ⚠️ 공지: 더 이상 포지션 보유 여부를 메모리로 '확인'하지 않습니다. (API로만 확인)
 current_position = None
 position_lock = threading.Lock()
 
@@ -124,14 +125,11 @@ class BitgetFuturesClient:
         signature = base64.b64encode(mac.digest()).decode()
         return signature
     
-    def _make_request(self, method: str, endpoint: str, data: Dict = None) -> Dict:
-        """API 요청 실행"""
+    def _make_request(self, method: str, endpoint: str, data: Dict = None, version: str = 'v1') -> Dict:
+        """API 요청 실행 (mix v1/v2 지원)"""
         try:
-            # 항상 현재 서버 시간 사용 (클라이언트 시간 무시)
             timestamp = str(int(time.time() * 1000))
-            
-            # 선물 거래 엔드포인트
-            request_path = f"/api/mix/v1{endpoint}"
+            request_path = f"/api/mix/{version}{endpoint}"
             
             # GET 요청의 경우 쿼리 파라미터를 URL에 추가
             if method.upper() == 'GET' and data:
@@ -142,7 +140,6 @@ class BitgetFuturesClient:
                 full_path = request_path
                 body = json.dumps(data) if data else ''
             
-            # 서명 생성 (GET 요청은 쿼리 파라미터 포함된 경로 사용)
             signature = self._generate_signature(timestamp, method.upper(), full_path, body)
             
             headers = {
@@ -163,14 +160,12 @@ class BitgetFuturesClient:
             else:
                 raise ValueError(f"Unsupported method: {method}")
             
-            # 응답 처리
             if response.status_code != 200:
                 logger.error(f"HTTP Error {response.status_code}: {response.text}")
                 raise Exception(f"HTTP Error {response.status_code}")
             
             result = response.json()
             
-            # Bitget API 에러 체크
             if result.get('code') != '00000':
                 error_msg = result.get('msg', 'Unknown error')
                 logger.error(f"API Error: {error_msg}, Full response: {result}")
@@ -181,7 +176,35 @@ class BitgetFuturesClient:
         except Exception as e:
             logger.error(f"Bitget API 요청 실패: {str(e)}")
             raise
-    
+
+    # =========================
+    # ✅ 핵심 변경 1: 레버리지 API로 강제 설정
+    # =========================
+    def set_leverage(self, symbol: str, leverage: int, hold_side: Optional[str] = None) -> Dict:
+        """심볼별 레버리지 설정 (v2)
+        문서: POST /api/v2/mix/account/set-leverage
+        - productType: USDT-FUTURES
+        - marginCoin: USDT
+        - holdSide: one-way에서는 생략 가능, hedge-mode에서만 필요
+        """
+        try:
+            payload = {
+                'symbol': symbol.upper(),
+                'productType': 'USDT-FUTURES',
+                'marginCoin': 'USDT'
+            }
+            if hold_side in ('long', 'short'):
+                payload['holdSide'] = hold_side
+            # 교차/원웨이 일반 케이스: leverage 필드 사용
+            payload['leverage'] = str(leverage)
+
+            result = self._make_request('POST', '/account/set-leverage', payload, version='v2')
+            logger.info(f"레버리지 설정 완료: {result}")
+            return result
+        except Exception as e:
+            logger.error(f"레버리지 설정 실패: {str(e)}")
+            raise
+
     def get_account_info(self, symbol: str) -> Dict:
         """계좌 정보 조회"""
         try:
@@ -201,36 +224,28 @@ class BitgetFuturesClient:
     def get_available_balance(self) -> float:
         """사용 가능한 USDT 잔고 조회"""
         try:
-            # 선물 계좌 잔고 조회 (수정된 엔드포인트)
             result = self._make_request('GET', '/account/accounts', {
                 'productType': 'umcbl'
             })
             
-            # 응답이 리스트인 경우
             if isinstance(result, list):
                 for account in result:
                     if account.get('marginCoin') == 'USDT':
-                        # available이 없으면 crossMaxAvailable 확인
                         available = account.get('available') or account.get('crossMaxAvailable') or account.get('usdtEquity')
                         if available:
                             return float(available)
-            # 응답이 딕셔너리인 경우
             elif isinstance(result, dict):
-                # 직접 USDT 정보 확인
                 if result.get('marginCoin') == 'USDT':
                     available = result.get('available') or result.get('crossMaxAvailable') or result.get('usdtEquity')
                     if available:
                         return float(available)
             
-            # 다른 방법으로 시도 - 특정 심볼로 계좌 정보 조회
             try:
                 account_info = self._make_request('GET', '/account/account', {
                     'symbol': 'BTCUSDT_UMCBL',
                     'marginCoin': 'USDT'
                 })
                 if account_info:
-                    # crossMaxAvailable: 크로스 모드에서 사용 가능한 최대 금액
-                    # available: 격리 모드에서 사용 가능한 금액
                     available = account_info.get('crossMaxAvailable') or account_info.get('available')
                     if available:
                         return float(available)
@@ -244,7 +259,9 @@ class BitgetFuturesClient:
             return 0.0
     
     def get_positions(self, symbol: str = None) -> list:
-        """현재 포지션 조회"""
+        """현재 포지션 조회 (v1 엔드포인트 유지)
+        ※ 보유 여부 확인은 반드시 이 API 결과로만 판단합니다.
+        """
         try:
             params = {'productType': 'umcbl'}
             if symbol:
@@ -259,11 +276,12 @@ class BitgetFuturesClient:
     
     def place_limit_order(self, symbol: str, side: str, size: float, price: float, 
                          leverage: int, tp_price: float = None, sl_price: float = None) -> Optional[str]:
-        """지정가 주문 실행 - 가격 정밀도 처리 추가"""
+        """지정가 주문 실행 - 가격 정밀도 처리 추가
+        ⚠️ 레버리지 적용은 사전에 set_leverage()로 강제 설정됩니다.
+        """
         try:
             formatted_symbol = symbol.replace('USDT', 'USDT_UMCBL')
             
-            # 가격을 소수점 2자리로 반올림 (Bitget 요구사항)
             price = round(price, 2)
             if tp_price:
                 tp_price = round(tp_price, 2)
@@ -277,11 +295,10 @@ class BitgetFuturesClient:
                 'orderType': 'limit',
                 'price': str(price),
                 'size': str(size),
-                'leverage': str(leverage),
+                'leverage': str(leverage),  # v1 파라미터(백워드 호환). 실제 레버리지는 set_leverage로 강제 적용됨
                 'timeinforce': 'normal'
             }
             
-            # TP/SL 설정
             if tp_price and sl_price:
                 data['presetTakeProfitPrice'] = str(tp_price)
                 data['presetStopLossPrice'] = str(sl_price)
@@ -304,7 +321,7 @@ class BitgetFuturesClient:
                 'holdSide': 'long'  # 또는 'short'
             }
             
-            result = self._make_request('POST', '/order/close-all-positions', data)
+            _ = self._make_request('POST', '/order/close-all-positions', data)
             return True
             
         except Exception as e:
@@ -346,21 +363,10 @@ def execute_entry_trade(data: Dict) -> Dict:
     
     try:
         with position_lock:
-            # 현재 포지션 확인
-            if current_position is not None:
-                message = f"""⚠️ <b>거래 신호 무시</b>
-
-이미 진행 중인 거래가 있습니다.
-현재 포지션: {current_position.get('symbol')}
-진입가: {current_position.get('entry_price'):,.2f}
-
-새로운 신호는 무시됩니다."""
-                send_telegram_message(message)
-                return {'status': 'ignored', 'reason': 'active_position_exists'}
-            
             bitget = BitgetFuturesClient()
             
-            # 기존 포지션 재확인 (API로 확인)
+            # ✅ 핵심 변경 2: 메모리(current_position)로 보유 여부 체크 제거
+            #    무조건 API로만 확인
             symbol = data.get('symbol', '')
             positions = bitget.get_positions(symbol)
             if positions and len(positions) > 0:
@@ -369,14 +375,14 @@ def execute_entry_trade(data: Dict) -> Dict:
                 return {'status': 'ignored', 'reason': 'position_exists_on_exchange'}
             
             # 거래 파라미터 - 가격 정밀도 처리
-            entry_price = round(float(data.get('price', 0)), 2)  # 소수점 2자리로 제한
-            tp_price = round(float(data.get('tp', 0)), 2)        # 소수점 2자리로 제한
-            sl_price = round(float(data.get('sl', 0)), 2)        # 소수점 2자리로 제한
+            entry_price = round(float(data.get('price', 0)), 2)
+            tp_price = round(float(data.get('tp', 0)), 2)
+            sl_price = round(float(data.get('sl', 0)), 2)
             
             # 레버리지 계산
             leverage = calculate_leverage(entry_price, sl_price)
             
-            # 레버리지가 31 이상이면 거래 중단
+            # 레버리지가 31 이상이면 거래 중단 (상한 체크는 내부 정책)
             if leverage > MAX_LEVERAGE:
                 message = f"""❌ <b>거래 범위가 너무 작습니다</b>
 
@@ -389,6 +395,15 @@ def execute_entry_trade(data: Dict) -> Dict:
                 send_telegram_message(message)
                 return {'status': 'rejected', 'reason': 'leverage_too_high', 'leverage': leverage}
             
+            # ✅ 레버리지 API로 강제 적용
+            try:
+                # 현재 구현은 원웨이(기본) 기준으로 long 설정
+                bitget.set_leverage(symbol=symbol, leverage=leverage, hold_side='long')
+            except Exception as e:
+                error_msg = f"레버리지 설정 실패: {str(e)}"
+                send_telegram_message(f"❌ <b>거래 실행 중단</b>\n{error_msg}")
+                return {'status': 'error', 'message': error_msg}
+            
             # 잔고 확인
             balance = bitget.get_available_balance()
             if balance < 10:
@@ -396,11 +411,10 @@ def execute_entry_trade(data: Dict) -> Dict:
             
             # 포지션 크기 계산 - 안전 마진 적용
             position_value = balance * 0.95  # 95%만 사용 (수수료 및 안전 마진)
-            position_notional = position_value * leverage  # 명목상 포지션 크기
-            position_size = position_notional / entry_price  # 실제 코인 수량
+            position_notional = position_value * leverage
+            position_size = position_notional / entry_price
             position_size = round(position_size, 3)
             
-            # 최소 주문 크기 확인 (일반적으로 0.001 이상)
             if position_size < 0.001:
                 raise Exception(f"포지션 크기가 너무 작습니다: {position_size:.6f}")
                 
@@ -420,7 +434,7 @@ def execute_entry_trade(data: Dict) -> Dict:
             if not order_id:
                 raise Exception("주문 실행 실패")
             
-            # 포지션 정보 저장 - position_value 수정
+            # (참고) 저장은 하되, 보유 여부 판단에는 사용하지 않음
             current_position = {
                 'symbol': symbol,
                 'entry_price': entry_price,
@@ -430,10 +444,9 @@ def execute_entry_trade(data: Dict) -> Dict:
                 'leverage': leverage,
                 'order_id': order_id,
                 'timestamp': datetime.now().isoformat(),
-                'balance_used': position_value  # 실제 사용된 잔고 (95% 적용)
+                'balance_used': position_value
             }
             
-            # 성공 메시지 - 계산 수정
             risk_amount = position_value * (LOSS_RATIO / 100)
             potential_profit = position_value * leverage * ((tp_price - entry_price) / entry_price)
             
@@ -445,7 +458,7 @@ def execute_entry_trade(data: Dict) -> Dict:
 🎯 <b>익절가:</b> {tp_price:,.2f} USDT (+{((tp_price-entry_price)/entry_price)*100:.2f}%)
 🛑 <b>손절가:</b> {sl_price:,.2f} USDT ({((sl_price-entry_price)/entry_price)*100:.2f}%)
 
-📊 <b>레버리지:</b> {leverage}x
+📊 <b>레버리지:</b> {leverage}x (API로 적용)
 💵 <b>사용 잔고:</b> {position_value:,.2f} USDT (95%)
 💵 <b>전체 잔고:</b> {balance:,.2f} USDT
 📈 <b>포지션 크기:</b> {position_size:.3f} {symbol.replace('USDT', '')}
@@ -490,37 +503,68 @@ def execute_exit_trade(data: Dict) -> Dict:
     try:
         with position_lock:
             symbol = data.get('symbol', '')
-            # exit_price도 소수점 2자리로 제한
             exit_price = round(float(data.get('exit_price', 0)), 2)
             result = data.get('result', '').upper()
             
-            # 포지션 정보 확인
+            # (변경점) 메모리 대신 API 결과를 우선 참조하여 정보 보강
+            entry_price = None
+            leverage = None
+            balance_used = None
+            
+            try:
+                bitget = BitgetFuturesClient()
+                # 단일 심볼 포지션 조회(v1 사용 중이면 빈 데이터일 수도 있음)
+                positions = bitget.get_positions(symbol)
+                if positions:
+                    pos = positions[0]
+                    entry_price = float(pos.get('openPriceAvg') or pos.get('openAvgPrice') or 0)
+                    leverage = int(float(pos.get('leverage') or 1))
+            except Exception:
+                pass
+
+            # 메모리에 보조 데이터가 남아있으면 보완용으로만 사용 (확인 용도 아님)
             if current_position and current_position.get('symbol') == symbol:
-                entry_price = current_position['entry_price']
-                leverage = current_position['leverage']
-                balance_used = current_position['balance_used']
-                
-                # 수익률 계산
-                price_change_percent = ((exit_price - entry_price) / entry_price) * 100
-                profit_rate = price_change_percent * leverage
-                profit_amount = balance_used * (profit_rate / 100)
-                
-                # 통계 업데이트
-                if result == 'PROFIT' or exit_price >= current_position['tp_price']:
-                    trade_result = 'WIN'
-                    stats.add_trade('WIN', profit_rate, symbol)
-                    emoji = "🎉"
-                    result_text = "익절"
-                else:
-                    trade_result = 'LOSS'
-                    stats.add_trade('LOSS', profit_rate, symbol)
-                    emoji = "😔"
-                    result_text = "손절"
-                
-                stats.save()
-                
-                # 메시지 전송
-                message = f"""{emoji} <b>거래 종료 알림</b>
+                entry_price = entry_price or current_position.get('entry_price')
+                leverage = leverage or current_position.get('leverage')
+                balance_used = balance_used or current_position.get('balance_used')
+
+            if not entry_price or not leverage:
+                # 정보가 부족해도 종료 알림은 보냄
+                message = f"""⚠️ <b>종료 신호 수신</b>
+
+📈 심볼: {symbol}
+🎯 종료가: {exit_price:,.2f}
+ℹ️ 포지션 세부정보를 API에서 확인할 수 없어 통계 갱신을 생략합니다."""
+                send_telegram_message(message)
+                return {
+                    'status': 'warning',
+                    'message': 'Position details unavailable; stats not updated.'
+                }
+            
+            # 수익률 계산
+            price_change_percent = ((exit_price - entry_price) / entry_price) * 100
+            profit_rate = price_change_percent * leverage
+            
+            # 투자금액 추정(없으면 계산식으로 대체)
+            if balance_used is None:
+                # entry_price * size 정보를 모르면 내부 정책으로 사용 잔고 95%를 재사용 불가 → 0 처리
+                balance_used = 0.0
+            profit_amount = balance_used * (profit_rate / 100)
+            
+            if result == 'PROFIT' or (entry_price and exit_price >= entry_price):
+                trade_result = 'WIN'
+                stats.add_trade('WIN', profit_rate, symbol)
+                emoji = "🎉"
+                result_text = "익절"
+            else:
+                trade_result = 'LOSS'
+                stats.add_trade('LOSS', profit_rate, symbol)
+                emoji = "😔"
+                result_text = "손절"
+            
+            stats.save()
+            
+            message = f"""{emoji} <b>거래 종료 알림</b>
 
 📈 <b>심볼:</b> {symbol}
 🔥 <b>결과:</b> {result_text}
@@ -530,42 +574,29 @@ def execute_exit_trade(data: Dict) -> Dict:
 📊 <b>가격 변동:</b> {price_change_percent:+.2f}%
 
 🎰 <b>레버리지:</b> {leverage}x
-💵 <b>투자금액:</b> {balance_used:,.2f} USDT
+💵 <b>투자금액(추정):</b> {balance_used:,.2f} USDT
 📈 <b>수익률:</b> {profit_rate:+.2f}%
-💰 <b>손익:</b> {profit_amount:+,.2f} USDT
+💰 <b>손익(추정):</b> {profit_amount:+,.2f} USDT
 
 📊 <b>전체 통계</b>
 ✅ 익절: {stats.wins}회
 ❌ 손절: {stats.losses}회
 📈 승률: {stats.get_win_rate():.1f}%
 
-ℹ️ <i>주의: TP/SL은 거래소에서 자동 실행됩니다</i>"""
-                
-                send_telegram_message(message)
-                logger.info(f"거래 종료: {symbol} - {result_text}, 수익률: {profit_rate:.2f}%")
-                
-                # 포지션 초기화
-                current_position = None
-                
-                return {
-                    'status': 'success',
-                    'result': trade_result,
-                    'profit_rate': profit_rate,
-                    'profit_amount': profit_amount
-                }
-            else:
-                message = f"""⚠️ <b>종료 신호 수신</b>
-
-📈 심볼: {symbol}
-🎯 종료가: {exit_price:,.2f}
-
-활성 포지션이 없거나 심볼이 일치하지 않습니다."""
-                send_telegram_message(message)
-                
-                return {
-                    'status': 'warning',
-                    'message': 'No matching position found'
-                }
+ℹ️ <i>주의: 보유 여부는 API로만 확인하며, 메모리는 보조 데이터로만 사용합니다</i>"""
+            
+            send_telegram_message(message)
+            logger.info(f"거래 종료: {symbol} - {result_text}, 수익률: {profit_rate:.2f}%")
+            
+            # 포지션 초기화(보조 데이터)
+            current_position = None
+            
+            return {
+                'status': 'success',
+                'result': trade_result,
+                'profit_rate': profit_rate,
+                'profit_amount': profit_amount
+            }
                 
     except Exception as e:
         logger.error(f"종료 처리 실패: {str(e)}")
@@ -611,7 +642,6 @@ def handle_telegram_command(command: str):
     
     try:
         if command == '/R' or command == '/r':
-            # 통계 리셋
             stats.reset()
             stats.save()
             
@@ -625,7 +655,6 @@ def handle_telegram_command(command: str):
             send_telegram_message(message)
             
         elif command == '/M' or command == '/m':
-            # Bitget 서버 연결 상태 확인
             message = "🔍 <b>Bitget 서버 연결 확인 중...</b>"
             send_telegram_message(message)
             
@@ -633,14 +662,11 @@ def handle_telegram_command(command: str):
                 bitget = BitgetFuturesClient()
                 start_time = time.time()
                 
-                # 1. API 연결 테스트 (계좌 정보 조회)
                 balance = bitget.get_available_balance()
                 api_latency = (time.time() - start_time) * 1000  # ms
                 
-                # 2. 더 상세한 계좌 정보 조회 시도
                 detailed_balance_info = ""
                 try:
-                    # 전체 계좌 정보 조회
                     accounts_result = bitget._make_request('GET', '/account/accounts', {'productType': 'umcbl'})
                     if accounts_result:
                         if isinstance(accounts_result, list):
@@ -658,16 +684,13 @@ def handle_telegram_command(command: str):
 • 크로스 가용: {float(cross_available):,.2f} USDT
 • 동결 금액: {float(frozen):,.2f} USDT
 • 미실현 손익: {float(unrealized_pnl):,.2f} USDT"""
-                                    # 가장 큰 값을 실제 잔고로 사용
                                     balance = max(float(available), float(cross_available), float(equity))
                 except Exception as e:
                     detailed_balance_info = f"\n⚠️ 상세 정보 조회 실패: {str(e)}"
                 
-                # 3. 서버 시간 확인 (Bitget 선물 API 사용)
                 server_time_test = True
                 time_sync = "확인 중..."
                 try:
-                    # Bitget 선물 공개 API로 서버 시간 확인
                     response = requests.get(
                         f"{BITGET_BASE_URL}/api/mix/v1/market/time",
                         timeout=5
@@ -689,7 +712,6 @@ def handle_telegram_command(command: str):
                             else:
                                 time_sync = f"❌ 큰 차이 ({time_diff/1000:.1f}초)"
                         else:
-                            # 첫 번째 방법 실패 시 다른 엔드포인트 시도
                             response2 = requests.get(
                                 f"{BITGET_BASE_URL}/api/spot/v1/public/time",
                                 timeout=5
@@ -706,16 +728,13 @@ def handle_telegram_command(command: str):
                             else:
                                 time_sync = "서버 접근 불가"
                     else:
-                        # 시간 동기화를 로컬 시간으로만 표시
                         time_sync = f"로컬 시간 사용"
                         
                 except Exception as e:
-                    # 시간 동기화 실패해도 다른 기능은 정상 작동
                     server_time_test = False
                     time_sync = "확인 생략 (영향 없음)"
                     logger.debug(f"시간 동기화 확인 실패: {str(e)}")
                 
-                # 4. 포지션 조회 테스트
                 positions_test = True
                 positions_info = ""
                 try:
@@ -723,7 +742,7 @@ def handle_telegram_command(command: str):
                     positions_count = len(positions) if positions else 0
                     if positions and len(positions) > 0:
                         positions_info = "\n📊 <b>활성 포지션:</b>"
-                        for pos in positions[:3]:  # 최대 3개만 표시
+                        for pos in positions[:3]:
                             symbol = pos.get('symbol', 'Unknown')
                             side = pos.get('holdSide', '')
                             size = pos.get('total', 0)
@@ -732,7 +751,6 @@ def handle_telegram_command(command: str):
                     positions_test = False
                     positions_count = -1
                 
-                # 연결 상태 평가
                 if api_latency < 3000:
                     status_emoji = "✅"
                     status_text = "정상"
@@ -746,7 +764,6 @@ def handle_telegram_command(command: str):
                     status_text = "매우 느림"
                     status_detail = f"심각한 지연 ({api_latency:.0f}ms)"
                 
-                # 상태 메시지 구성
                 message = f"""{status_emoji} <b>Bitget 서버 상태</b>
 
 📡 <b>연결 상태:</b> {status_text}
@@ -762,7 +779,6 @@ def handle_telegram_command(command: str):
 현물 계좌와는 별도로 관리됩니다."""
                 
             except Exception as e:
-                # 연결 실패 메시지
                 message = f"""❌ <b>Bitget 서버 연결 실패</b>
 
 ⚠️ <b>오류 내용:</b> {str(e)}
@@ -779,21 +795,16 @@ def handle_telegram_command(command: str):
             send_telegram_message(message)
             
         elif command == '/S' or command == '/s':
-            # 통계 및 상태 조회
             bitget = BitgetFuturesClient()
-            
-            # 계좌 정보
             balance = bitget.get_available_balance()
             positions = bitget.get_positions()
             
-            # 포지션 정보
             position_info = "없음"
             if current_position:
                 position_info = f"{current_position['symbol']} (레버리지: {current_position['leverage']}x)"
             elif positions:
                 position_info = f"{len(positions)}개 포지션 활성"
             
-            # 최근 거래 내역
             recent_trades = ""
             if stats.trades_history:
                 last_5_trades = stats.trades_history[-5:]
@@ -851,20 +862,15 @@ def home():
 def webhook():
     """TradingView 웹훅 수신"""
     try:
-        # Content-Type 확인 및 데이터 파싱
         content_type = request.headers.get('Content-Type', '')
         
-        # JSON 데이터 파싱 시도
         if 'application/json' in content_type:
             data = request.get_json()
         else:
-            # Content-Type이 application/json이 아닌 경우 raw data로 파싱
             raw_data = request.get_data(as_text=True)
             try:
-                # TradingView는 때때로 text/plain으로 JSON을 보냄
                 data = json.loads(raw_data)
             except json.JSONDecodeError:
-                # JSON 파싱 실패 시 raw 텍스트 그대로 처리
                 logger.warning(f"JSON 파싱 실패, raw data: {raw_data[:200]}")
                 data = {'raw_message': raw_data}
         
@@ -884,7 +890,6 @@ def webhook():
             return jsonify(result), 200
             
         else:
-            # action이 없는 경우 raw message 확인
             if 'raw_message' in data:
                 logger.warning(f"알 수 없는 메시지 형식: {data['raw_message'][:100]}")
                 message = f"""⚠️ <b>알 수 없는 웹훅 형식</b>
@@ -900,7 +905,6 @@ TradingView Alert 메시지를 JSON 형식으로 설정해주세요:
     except Exception as e:
         logger.error(f"웹훅 처리 오류: {str(e)}")
         
-        # 오류 상세 정보 텔레그램 전송
         error_message = f"""❌ <b>웹훅 처리 오류</b>
 
 오류: {str(e)}
