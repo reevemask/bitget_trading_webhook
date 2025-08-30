@@ -346,9 +346,21 @@ def execute_entry_trade(data: Dict) -> Dict:
     
     try:
         with position_lock:
+            # 현재 포지션 확인
+            if current_position is not None:
+                message = f"""⚠️ <b>거래 신호 무시</b>
+
+이미 진행 중인 거래가 있습니다.
+현재 포지션: {current_position.get('symbol')}
+진입가: {current_position.get('entry_price'):,.2f}
+
+새로운 신호는 무시됩니다."""
+                send_telegram_message(message)
+                return {'status': 'ignored', 'reason': 'active_position_exists'}
+            
             bitget = BitgetFuturesClient()
             
-            # API로 기존 포지션 확인 (메모리 확인 제거)
+            # 기존 포지션 재확인 (API로 확인)
             symbol = data.get('symbol', '')
             positions = bitget.get_positions(symbol)
             if positions and len(positions) > 0:
@@ -408,7 +420,7 @@ def execute_entry_trade(data: Dict) -> Dict:
             if not order_id:
                 raise Exception("주문 실행 실패")
             
-            # 포지션 정보 저장 (참고용, API가 진실의 원천)
+            # 포지션 정보 저장 - position_value 수정
             current_position = {
                 'symbol': symbol,
                 'entry_price': entry_price,
@@ -651,283 +663,4 @@ def handle_telegram_command(command: str):
                 except Exception as e:
                     detailed_balance_info = f"\n⚠️ 상세 정보 조회 실패: {str(e)}"
                 
-                # 3. 서버 시간 확인 (Bitget 선물 API 사용)
-                server_time_test = True
-                time_sync = "확인 중..."
-                try:
-                    # Bitget 선물 공개 API로 서버 시간 확인
-                    response = requests.get(
-                        f"{BITGET_BASE_URL}/api/mix/v1/market/time",
-                        timeout=5
-                    )
-                    
-                    if response.status_code == 200:
-                        server_data = response.json()
-                        if server_data.get('code') == '00000':
-                            server_timestamp = int(server_data.get('data', 0))
-                            local_timestamp = int(time.time() * 1000)
-                            time_diff = abs(server_timestamp - local_timestamp)
-                            
-                            if time_diff < 1000:
-                                time_sync = f"✅ 완벽 동기화 ({time_diff}ms)"
-                            elif time_diff < 5000:
-                                time_sync = f"✅ 정상 ({time_diff}ms 차이)"
-                            elif time_diff < 30000:
-                                time_sync = f"⚠️ 약간 차이 ({time_diff}ms)"
-                            else:
-                                time_sync = f"❌ 큰 차이 ({time_diff/1000:.1f}초)"
-                        else:
-                            # 첫 번째 방법 실패 시 다른 엔드포인트 시도
-                            response2 = requests.get(
-                                f"{BITGET_BASE_URL}/api/spot/v1/public/time",
-                                timeout=5
-                            )
-                            if response2.status_code == 200:
-                                server_data2 = response2.json()
-                                if server_data2.get('code') == '00000':
-                                    server_timestamp = int(server_data2.get('data', {}).get('serverTime', 0))
-                                    local_timestamp = int(time.time() * 1000)
-                                    time_diff = abs(server_timestamp - local_timestamp)
-                                    time_sync = f"정상 ({time_diff}ms 차이)" if time_diff < 5000 else f"차이 {time_diff}ms"
-                                else:
-                                    time_sync = "API 응답 오류"
-                            else:
-                                time_sync = "서버 접근 불가"
-                    else:
-                        # 시간 동기화를 로컬 시간으로만 표시
-                        time_sync = f"로컬 시간 사용"
-                        
-                except Exception as e:
-                    # 시간 동기화 실패해도 다른 기능은 정상 작동
-                    server_time_test = False
-                    time_sync = "확인 생략 (영향 없음)"
-                    logger.debug(f"시간 동기화 확인 실패: {str(e)}")
-                
-                # 4. 포지션 조회 테스트
-                positions_test = True
-                positions_info = ""
-                try:
-                    positions = bitget.get_positions()
-                    positions_count = len(positions) if positions else 0
-                    if positions and len(positions) > 0:
-                        positions_info = "\n📊 <b>활성 포지션:</b>"
-                        for pos in positions[:3]:  # 최대 3개만 표시
-                            symbol = pos.get('symbol', 'Unknown')
-                            side = pos.get('holdSide', '')
-                            size = pos.get('total', 0)
-                            positions_info += f"\n• {symbol}: {side} {size}"
-                except:
-                    positions_test = False
-                    positions_count = -1
-                
-                # 연결 상태 평가
-                if api_latency < 3000:
-                    status_emoji = "✅"
-                    status_text = "정상"
-                    status_detail = "모든 시스템 정상 작동"
-                elif api_latency < 5000:
-                    status_emoji = "⚠️"
-                    status_text = "느림"
-                    status_detail = f"응답 지연 ({api_latency:.0f}ms)"
-                else:
-                    status_emoji = "❌"
-                    status_text = "매우 느림"
-                    status_detail = f"심각한 지연 ({api_latency:.0f}ms)"
-                
-                # 상태 메시지 구성
-                message = f"""{status_emoji} <b>Bitget 서버 상태</b>
-
-📡 <b>연결 상태:</b> {status_text}
-⚡ <b>응답 속도:</b> {api_latency:.0f}ms
-🕐 <b>시간 동기화:</b> {time_sync}
-{detailed_balance_info if detailed_balance_info else f'💵 <b>가용 잔고:</b> {balance:,.2f} USDT'}
-📈 <b>포지션 수:</b> {positions_count if positions_count >= 0 else '확인 불가'}개{positions_info}
-
-📝 <b>상태 요약:</b> {status_detail}
-⏰ <b>확인 시간:</b> {datetime.now().strftime('%H:%M:%S')}
-
-💡 <b>참고:</b> 선물 계좌 잔고를 표시합니다.
-현물 계좌와는 별도로 관리됩니다."""
-                
-            except Exception as e:
-                # 연결 실패 메시지
-                message = f"""❌ <b>Bitget 서버 연결 실패</b>
-
-⚠️ <b>오류 내용:</b> {str(e)}
-
-<b>확인 사항:</b>
-1. API Key가 올바른지 확인
-2. Secret Key가 올바른지 확인
-3. Passphrase가 올바른지 확인
-4. API 권한 설정 확인 (Futures 권한)
-5. IP 화이트리스트 설정 확인
-
-⏰ <b>확인 시간:</b> {datetime.now().strftime('%H:%M:%S')}"""
-            
-            send_telegram_message(message)
-            
-        elif command == '/S' or command == '/s':
-            # 통계 및 상태 조회
-            bitget = BitgetFuturesClient()
-            
-            # 계좌 정보
-            balance = bitget.get_available_balance()
-            positions = bitget.get_positions()
-            
-            # 포지션 정보
-            position_info = "없음"
-            if current_position:
-                position_info = f"{current_position['symbol']} (레버리지: {current_position['leverage']}x)"
-            elif positions:
-                position_info = f"{len(positions)}개 포지션 활성"
-            
-            # 최근 거래 내역
-            recent_trades = ""
-            if stats.trades_history:
-                last_5_trades = stats.trades_history[-5:]
-                for trade in reversed(last_5_trades):
-                    emoji = "✅" if trade['result'] == 'WIN' else "❌"
-                    recent_trades += f"\n{emoji} {trade['symbol']}: {trade['profit_rate']:+.2f}%"
-            
-            if not recent_trades:
-                recent_trades = "\n최근 거래 없음"
-            
-            message = f"""📊 <b>거래 현황 및 통계</b>
-
-💰 <b>계좌 정보</b>
-• 가용 잔고: {balance:,.2f} USDT
-• 거래 상태: {position_info}
-
-📈 <b>거래 통계</b>
-• 익절: {stats.wins}회
-• 손절: {stats.losses}회
-• 전체: {stats.total_trades}회
-• 승률: {stats.get_win_rate():.1f}%
-
-📋 <b>최근 거래 (최대 5개)</b>{recent_trades}
-
-⏰ 통계 시작: {stats.start_date.strftime('%Y-%m-%d %H:%M')}"""
-            
-            send_telegram_message(message)
-            
-    except Exception as e:
-        logger.error(f"명령어 처리 오류: {str(e)}")
-        send_telegram_message(f"❌ 명령어 처리 중 오류 발생: {str(e)}")
-
-# Flask 라우트
-@app.route('/', methods=['GET'])
-def home():
-    """서버 상태 확인"""
-    return jsonify({
-        'status': 'healthy',
-        'message': 'Bitget 자동거래 웹훅 서버 작동중',
-        'time': datetime.now().isoformat(),
-        'settings': {
-            'loss_ratio': LOSS_RATIO,
-            'max_leverage': MAX_LEVERAGE,
-            'position_size': '100%'
-        },
-        'active_position': current_position is not None,
-        'stats': {
-            'wins': stats.wins,
-            'losses': stats.losses,
-            'win_rate': stats.get_win_rate()
-        }
-    })
-
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    """TradingView 웹훅 수신"""
-    try:
-        # 안전한 데이터 파싱
-        data = None
-        
-        try:
-            # 먼저 JSON으로 파싱 시도
-            data = request.get_json(force=True)
-        except Exception as json_error:
-            # JSON 파싱 실패시 raw 데이터로 시도
-            try:
-                raw_data = request.get_data(as_text=True)
-                if raw_data:
-                    data = json.loads(raw_data)
-                else:
-                    logger.error("빈 요청 데이터")
-                    return jsonify({'error': 'Empty request data'}), 400
-            except Exception as raw_error:
-                logger.error(f"JSON 파싱 완전 실패: json_error={json_error}, raw_error={raw_error}")
-                return jsonify({'error': 'Invalid JSON format'}), 400
-        
-        if not data:
-            logger.error("파싱된 데이터가 없음")
-            return jsonify({'error': 'No valid data received'}), 400
-        
-        logger.info(f"웹훅 수신: {data}")
-        
-        action = data.get('action', '').upper()
-        
-        if action == 'ENTRY':
-            result = execute_entry_trade(data)
-            return jsonify(result), 200 if result['status'] == 'success' else 400
-            
-        elif action == 'EXIT':
-            result = execute_exit_trade(data)
-            return jsonify(result), 200
-            
-        else:
-            logger.warning(f"알 수 없는 액션: {action}")
-            return jsonify({'error': f'Unknown action: {action}'}), 400
-            
-    except Exception as e:
-        logger.error(f"웹훅 처리 오류: {str(e)}")
-        
-        # 오류 상세 정보 텔레그램 전송
-        error_message = f"""❌ <b>웹훅 처리 오류</b>
-
-오류: {str(e)}
-시간: {datetime.now().strftime('%H:%M:%S')}
-
-TradingView Alert 설정을 확인해주세요."""
-        send_telegram_message(error_message)
-        
-        return jsonify({'error': str(e)}), 500ify({'error': str(e)}), 500
-
-@app.route('/test', methods=['GET'])
-def test_connection():
-    """연결 테스트"""
-    try:
-        bitget = BitgetFuturesClient()
-        balance = bitget.get_available_balance()
-        
-        message = f"""🧪 <b>시스템 테스트</b>
-
-✅ 서버: 정상
-✅ Bitget API: 연결됨
-💰 잔고: {balance:,.2f} USDT
-📊 손실 비율: {LOSS_RATIO}%
-🎰 최대 레버리지: {MAX_LEVERAGE}x
-
-텔레그램 명령어:
-/S - 상태 및 통계 조회
-/R - 통계 초기화
-/M - Bitget 서버 상태 확인"""
-        
-        send_telegram_message(message)
-        
-        return jsonify({
-            'status': 'success',
-            'balance': balance
-        })
-        
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-if __name__ == '__main__':
-    # 텔레그램 봇 폴링 스레드 시작
-    import threading
-    bot_thread = threading.Thread(target=telegram_bot_polling, daemon=True)
-    bot_thread.start()
-    
-    # Flask 서버 시작
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+                # 3. 서버 시간 확인 (
