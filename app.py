@@ -346,21 +346,9 @@ def execute_entry_trade(data: Dict) -> Dict:
     
     try:
         with position_lock:
-            # 현재 포지션 확인
-            if current_position is not None:
-                message = f"""⚠️ <b>거래 신호 무시</b>
-
-이미 진행 중인 거래가 있습니다.
-현재 포지션: {current_position.get('symbol')}
-진입가: {current_position.get('entry_price'):,.2f}
-
-새로운 신호는 무시됩니다."""
-                send_telegram_message(message)
-                return {'status': 'ignored', 'reason': 'active_position_exists'}
-            
             bitget = BitgetFuturesClient()
             
-            # 기존 포지션 재확인 (API로 확인)
+            # API로 기존 포지션 확인 (메모리 확인 제거)
             symbol = data.get('symbol', '')
             positions = bitget.get_positions(symbol)
             if positions and len(positions) > 0:
@@ -420,7 +408,7 @@ def execute_entry_trade(data: Dict) -> Dict:
             if not order_id:
                 raise Exception("주문 실행 실패")
             
-            # 포지션 정보 저장 - position_value 수정
+            # 포지션 정보 저장 (참고용, API가 진실의 원천)
             current_position = {
                 'symbol': symbol,
                 'entry_price': entry_price,
@@ -851,25 +839,28 @@ def home():
 def webhook():
     """TradingView 웹훅 수신"""
     try:
-        # Content-Type 확인 및 데이터 파싱
-        content_type = request.headers.get('Content-Type', '')
+        # 안전한 데이터 파싱
+        data = None
         
-        # JSON 데이터 파싱 시도
-        if 'application/json' in content_type:
-            data = request.get_json()
-        else:
-            # Content-Type이 application/json이 아닌 경우 raw data로 파싱
-            raw_data = request.get_data(as_text=True)
+        try:
+            # 먼저 JSON으로 파싱 시도
+            data = request.get_json(force=True)
+        except Exception as json_error:
+            # JSON 파싱 실패시 raw 데이터로 시도
             try:
-                # TradingView는 때때로 text/plain으로 JSON을 보냄
-                data = json.loads(raw_data)
-            except json.JSONDecodeError:
-                # JSON 파싱 실패 시 raw 텍스트 그대로 처리
-                logger.warning(f"JSON 파싱 실패, raw data: {raw_data[:200]}")
-                data = {'raw_message': raw_data}
+                raw_data = request.get_data(as_text=True)
+                if raw_data:
+                    data = json.loads(raw_data)
+                else:
+                    logger.error("빈 요청 데이터")
+                    return jsonify({'error': 'Empty request data'}), 400
+            except Exception as raw_error:
+                logger.error(f"JSON 파싱 완전 실패: json_error={json_error}, raw_error={raw_error}")
+                return jsonify({'error': 'Invalid JSON format'}), 400
         
         if not data:
-            return jsonify({'error': 'No data received'}), 400
+            logger.error("파싱된 데이터가 없음")
+            return jsonify({'error': 'No valid data received'}), 400
         
         logger.info(f"웹훅 수신: {data}")
         
@@ -884,17 +875,7 @@ def webhook():
             return jsonify(result), 200
             
         else:
-            # action이 없는 경우 raw message 확인
-            if 'raw_message' in data:
-                logger.warning(f"알 수 없는 메시지 형식: {data['raw_message'][:100]}")
-                message = f"""⚠️ <b>알 수 없는 웹훅 형식</b>
-
-받은 데이터: {data['raw_message'][:200]}
-
-TradingView Alert 메시지를 JSON 형식으로 설정해주세요:
-{{"action": "ENTRY", "symbol": "BTCUSDT", ...}}"""
-                send_telegram_message(message)
-            
+            logger.warning(f"알 수 없는 액션: {action}")
             return jsonify({'error': f'Unknown action: {action}'}), 400
             
     except Exception as e:
@@ -909,7 +890,7 @@ TradingView Alert 메시지를 JSON 형식으로 설정해주세요:
 TradingView Alert 설정을 확인해주세요."""
         send_telegram_message(error_message)
         
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': str(e)}), 500ify({'error': str(e)}), 500
 
 @app.route('/test', methods=['GET'])
 def test_connection():
