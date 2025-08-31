@@ -356,7 +356,7 @@ def calculate_leverage(entry_price: float, sl_price: float) -> int:
     if risk_percent == 0:
         return 1
     leverage = int(LOSS_RATIO / risk_percent)
-    return max(1, min(leverage, MAX_LEVERAGE))
+    return max(1, leverage)
 
 def calculate_position_size(balance: float, leverage: int) -> float:
     """포지션 크기 계산 (100% 사용)"""
